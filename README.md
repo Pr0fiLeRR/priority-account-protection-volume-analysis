@@ -1,4 +1,4 @@
-## Detection as Code - PAP Volume Analysis (Pre vs. PosPOST Enablement)
+## Detection as Code - PAP Volume Analysis (Pre vs. POST Enablement)
 
 ### Instructions
 
