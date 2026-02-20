@@ -1,0 +1,14 @@
+## Detection as Code - PAP Volume Analysis (Pre vs. PosPOST Enablement)
+
+### Instructions
+
+- Line 14
+    - Make sure to include all emails you want to consider as these are just placeholders.
+
+<br/>
+<img align="left" alt="Detections.ai logo" width="120px" src="https://detections.ai/detections-logo-navbar.svg"/>
+<br/>
+
+This rule detects the email delivery delta, comparing before and after the Priority Account Protection Enablement date.
+
+- [Link to this contribution](https://detections.ai/rules/019c77b5-484a-738b-928b-3a07f42adaa6)

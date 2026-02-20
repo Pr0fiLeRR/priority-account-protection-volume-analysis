@@ -1,0 +1,157 @@
+//
+// LOCATION: portal.azure.com > Microsoft Sentinel > Logs
+// AUTHOR: Daniel Miller, Igor Oliveira, Nicholas Isakson, Seumas Jarrett
+// TITLE: PAP Volume Analysis (Pre- vs. Post-Enablement)
+// 
+// ==========================================================================================
+// 1. CONFIGURATION & VARIABLES
+// ==========================================================================================
+let EnablementDate = datetime(2026-02-11 23:25:00); 
+// --- DYNAMIC TIME CALCULATION ---
+let TimePassed = now() - EnablementDate;          // Calculates time since enablement
+let StartTime = EnablementDate - TimePassed;      // Mirrors that time backwards
+// --------------------------------
+let Users = datatable(Recipients: string)["name.lastname@domain.tld","name.lastname@domain.tld","name.lastname@domain.tld","name.lastname@domain.tld","name.lastname@domain.tld"];
+// ==========================================================================================
+// 2. DATA SCAFFOLDING
+// ==========================================================================================
+let UserStates = 
+    union 
+        (Users
+        | extend State = "Pre-Enablement"),
+        (Users
+        | extend State = "POST-ENABLEMENT");
+// ==========================================================================================
+// 3. CORE METRICS
+// ==========================================================================================
+let Core_Metrics = 
+    EmailEvents
+    | where TimeGenerated between (StartTime .. now())  // <--- UPDATED TIME FILTER
+    | where RecipientEmailAddress in (Users)
+    | extend State = iff(TimeGenerated < EnablementDate, "Pre-Enablement", "POST-ENABLEMENT")
+    | extend 
+        IsBlocked = iff(DeliveryAction startswith "Blocked", 1, 0),
+        IsJunk = iff((DeliveryAction == "Junked" or DeliveryLocation == "JunkFolder"), 1, 0)
+    // Inbox = Anything that is NOT Blocked and NOT Junk
+    | extend IsInbox = iff(IsBlocked == 0 and IsJunk == 0, 1, 0)
+    | summarize 
+        TotalEmails = count(),
+        InboxEmails = sum(IsInbox),
+        BlockedEmails = sum(IsBlocked),
+        JunkedEmails = sum(IsJunk)
+        by Recipients = RecipientEmailAddress, State;
+// ==========================================================================================
+// 4. BLOCKED ANALYSIS (Hierarchy via 'ThreatTypes')
+// ==========================================================================================
+let Block_Hierarchy = 
+    EmailEvents
+    | where TimeGenerated between (StartTime .. now()) // <--- UPDATED TIME FILTER
+    | where RecipientEmailAddress in (Users)
+    | where DeliveryAction startswith "Blocked"
+    | extend State = iff(TimeGenerated < EnablementDate, "Pre-Enablement", "POST-ENABLEMENT")
+    // ---------------------------------------------------------------------------------------
+    // CLASSIFICATION
+    // ---------------------------------------------------------------------------------------
+    | extend Category = case(
+                        ThreatTypes has "Malware",
+                        "Malware",
+                        ThreatTypes has "Phish",
+                        "Phish",
+                        ThreatTypes has "Spam",
+                        "Spam",
+                        "Policy / Other"
+                    )
+    // ---------------------------------------------------------------------------------------
+    | extend RawMethod = tostring(split(DetectionMethods, ";")[0])
+    | extend PrimaryMethod = iff(isempty(trim(" ", RawMethod)), "Unknown / Unspecified", trim(" ", RawMethod))
+    | extend Recipients = RecipientEmailAddress
+    | summarize MethodCount = count(), Policies = make_set(EmailActionPolicy)
+        by Recipients, State, Category, PrimaryMethod
+    | summarize 
+        Cat_Total_Hits = sum(MethodCount),
+        Cat_Reasons = make_bag(pack(PrimaryMethod, MethodCount)), 
+        Cat_Policies = make_set(Policies)
+        by Recipients, State, Category
+    | extend 
+        IsMalware = iff(Category == "Malware", Cat_Total_Hits, 0),
+        IsPhish = iff(Category == "Phish", Cat_Total_Hits, 0),
+        IsSpam = iff(Category == "Spam", Cat_Total_Hits, 0),
+        IsOther = iff(Category == "Policy / Other", Cat_Total_Hits, 0)
+    | summarize 
+        Malware_Count = sum(IsMalware),
+        Phish_Count = sum(IsPhish),
+        Spam_Count = sum(IsSpam),
+        Other_Count = sum(IsOther),
+        Block_Details_Tree = make_bag(
+                         pack(
+    Category,
+    pack(
+    "Specific_Reasons",
+    Cat_Reasons,
+    "Related_Policies",
+    Cat_Policies
+)
+)
+                     )
+        by Recipients, State;
+// ==========================================================================================
+// 5. FINAL ASSEMBLY
+// ==========================================================================================
+UserStates
+| join kind=leftouter (Core_Metrics) on Recipients, State
+| join kind=leftouter (Block_Hierarchy) on Recipients, State
+| extend Details = coalesce(Block_Details_Tree, dynamic({}))
+| project 
+    Recipients, 
+    State,
+    TotalEmails, 
+    // --- MASTER OBJECT ---
+    Email_Traffic = pack(
+                    // Level 1: Volume
+                    "Total",
+                    coalesce(TotalEmails, 0),
+                    "Inbox",
+                    coalesce(InboxEmails, 0),
+                    "Junk",
+                    coalesce(JunkedEmails, 0),
+                    // Level 2: Blocked (The Parent Object)
+                    "Blocked",
+                    pack(
+    "Total_Count",
+    coalesce(BlockedEmails, 0),
+    // Level 3: The Analysis Breakdown
+    "Analysis",
+    pack(
+    "Malware",
+    pack(
+    "Count",
+    coalesce(Malware_Count, 0), 
+    "Details",
+    Details['Malware']
+),
+    "Phish",
+    pack(
+    "Count",
+    coalesce(Phish_Count, 0), 
+    "Details",
+    Details['Phish']
+),
+    "Spam",
+    pack(
+    "Count",
+    coalesce(Spam_Count, 0), 
+    "Details",
+    Details['Spam']
+),
+    "Other",
+    pack(
+    "Count",
+    coalesce(Other_Count, 0), 
+    "Details",
+    Details['Policy / Other']
+)
+)
+)
+                )
+| where toint(Email_Traffic.Total) > 0
+| order by Recipients asc, State desc
